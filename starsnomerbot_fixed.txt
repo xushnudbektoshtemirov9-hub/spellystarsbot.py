@@ -1,0 +1,2303 @@
+"""
+Telegram bot — Stars, Premium, Gift va FixSIM nomer xizmatlari
+To'lov: HUMO karta (avtomatik)
+"""
+
+import asyncio
+import logging
+import random
+import sys
+import os
+import json
+import time
+import aiosqlite
+import httpx
+from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from aiogram import Bot, Dispatcher, Router, F
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import Command, StateFilter, Filter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton, CopyTextButton,
+)
+
+# ─── Sozlamalar ───────────────────────────────────────────────
+# MUHIM: Bu qiymatlarni .env fayliga yoki environment o'zgaruvchilariga ko'chiring!
+BOT_TOKEN        = os.environ.get("BOT_TOKEN",        "8893001472:AAHhcXOXvciHHFJJ9OXxOnVTRZm0XVqFfhQ")
+ADMIN_ID         = int(os.environ.get("ADMIN_ID",     "8541213007"))
+HYPERPIN_API_URL = os.environ.get("HYPERPIN_API_URL", "https://hyperpin.top/api/v1")
+HYPERPIN_API_KEY = os.environ.get("HYPERPIN_API_KEY", "hp_859b4f4805a721c8a60e57ed81a2d975")
+SHOP_ID          = int(os.environ.get("SHOP_ID",      "24"))
+SHOP_KEY         = os.environ.get("SHOP_KEY",         "sk_f37c8fa4298ab6ec43e91c20d2400a80")
+SHOP_API         = os.environ.get("SHOP_API",         "https://694bccc3c315b.myxvest1.ru/super/api.php")
+FIXSIM_API_KEY   = os.environ.get("FIXSIM_API_KEY",   "a708e132cd86637")
+FIXSIM_API_URL   = os.environ.get("FIXSIM_API_URL",   "https://69eda83c94f75.myxvest2.ru/index")
+DB_PATH          = os.environ.get("DB_PATH",           "bot_data.db")
+
+DEFAULT_STARS_PACKAGES = [
+    {"stars": 50,   "price": 15000},
+    {"stars": 100,  "price": 28000},
+    {"stars": 250,  "price": 65000},
+    {"stars": 500,  "price": 125000},
+    {"stars": 1000, "price": 240000},
+    {"stars": 2500, "price": 580000},
+]
+
+DEFAULT_PREMIUM_PACKAGES = [
+    {"months": 1,  "label": "1 oy",  "price": 85000},
+    {"months": 3,  "label": "3 oy",  "price": 240000},
+    {"months": 6,  "label": "6 oy",  "price": 450000},
+    {"months": 12, "label": "12 oy", "price": 850000},
+]
+
+DEFAULT_GIFT_PACKAGES = [
+    {"gift_id": "gift_select:1:15",  "name": "🧸 Teddy Bear", "stars_cost": 15,  "price": 3000},
+    {"gift_id": "gift_select:0:15",  "name": "💖 Heart",      "stars_cost": 15,  "price": 3000},
+    {"gift_id": "gift_select:0:25",  "name": "🎁 Gift Box",   "stars_cost": 25,  "price": 5000},
+    {"gift_id": "gift_select:1:25",  "name": "🌹 Atirgul",    "stars_cost": 25,  "price": 5000},
+    {"gift_id": "gift_select:0:50",  "name": "🎂 Tort",       "stars_cost": 50,  "price": 10000},
+    {"gift_id": "gift_select:1:50",  "name": "💐 Guldasta",   "stars_cost": 50,  "price": 10000},
+    {"gift_id": "gift_select:2:50",  "name": "🚀 Raketa",     "stars_cost": 50,  "price": 10000},
+    {"gift_id": "gift_select:3:50",  "name": "🍾 Champagne",  "stars_cost": 50,  "price": 10000},
+    {"gift_id": "gift_select:0:100", "name": "🏆 Kubok",      "stars_cost": 100, "price": 20000},
+    {"gift_id": "gift_select:1:100", "name": "💍 Uzuk",       "stars_cost": 100, "price": 20000},
+    {"gift_id": "gift_select:2:100", "name": "💎 Olmos",      "stars_cost": 100, "price": 20000},
+]
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger(__name__)
+
+
+# ─── Filtrlar ─────────────────────────────────────────────────
+class IsAdmin(Filter):
+    async def __call__(self, msg: Message) -> bool:
+        return msg.from_user.id == ADMIN_ID
+
+admin_only = IsAdmin()
+
+
+# ─── Baza ─────────────────────────────────────────────────────
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        for sql in [
+            """CREATE TABLE IF NOT EXISTS settings
+               (key TEXT PRIMARY KEY, value TEXT)""",
+            """CREATE TABLE IF NOT EXISTS orders
+               (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER, order_id INTEGER, type TEXT,
+                amount INTEGER, price REAL,
+                recipient TEXT DEFAULT '',
+                extra_data TEXT DEFAULT '',
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""",
+            """CREATE TABLE IF NOT EXISTS forced_channels
+               (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id TEXT, channel_title TEXT, channel_link TEXT)""",
+            """CREATE TABLE IF NOT EXISTS users
+               (user_id INTEGER PRIMARY KEY, username TEXT, full_name TEXT,
+                balance INTEGER DEFAULT 0,
+                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""",
+            """CREATE TABLE IF NOT EXISTS sms_flood
+               (user_id INTEGER, hash_key TEXT, last_checked INTEGER,
+                PRIMARY KEY (user_id, hash_key))""",
+        ]:
+            await db.execute(sql)
+        await db.commit()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        for col, default in [("recipient", "''"), ("extra_data", "''")]:
+            try:
+                await db.execute(
+                    f"ALTER TABLE orders ADD COLUMN {col} TEXT DEFAULT {default}"
+                )
+                await db.commit()
+            except Exception:
+                pass
+
+    defaults = {
+        "stars_packages":        json.dumps(DEFAULT_STARS_PACKAGES),
+        "premium_packages":      json.dumps(DEFAULT_PREMIUM_PACKAGES),
+        "gift_packages":         json.dumps(DEFAULT_GIFT_PACKAGES),
+        "stars_enabled":         "1",
+        "premium_enabled":       "1",
+        "gift_enabled":          "1",
+        "nomer_enabled":         "1",
+        "nomer_price_overrides": "{}",
+        "welcome_text":          (
+            "Assalomu alaykum! ⭐ Stars, 💎 Premium, 🎁 Gift va "
+            "📞 Telegram nomer xarid qilish uchun quyidagi bo'limni tanlang."
+        ),
+    }
+    async with aiosqlite.connect(DB_PATH) as db:
+        for k, v in defaults.items():
+            await db.execute(
+                "INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)", (k, v)
+            )
+        await db.commit()
+
+
+async def get_setting(key, default=None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT value FROM settings WHERE key=?", (key,)
+        ) as c:
+            row = await c.fetchone()
+            return row[0] if row else default
+
+async def set_setting(key, value):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)", (key, value)
+        )
+        await db.commit()
+
+
+# ─── Paketlar CRUD ────────────────────────────────────────────
+PACKAGE_NAMES = {
+    "stars":   ("stars_packages",   DEFAULT_STARS_PACKAGES),
+    "premium": ("premium_packages", DEFAULT_PREMIUM_PACKAGES),
+    "gift":    ("gift_packages",    DEFAULT_GIFT_PACKAGES),
+}
+
+async def get_packages(pkg_type: str):
+    key, default = PACKAGE_NAMES[pkg_type]
+    raw = await get_setting(key)
+    return json.loads(raw) if raw else default
+
+async def set_packages(pkg_type: str, pkgs: list):
+    key, _ = PACKAGE_NAMES[pkg_type]
+    await set_setting(key, json.dumps(pkgs))
+
+get_stars_packages   = lambda: get_packages("stars")
+set_stars_packages   = lambda p: set_packages("stars", p)
+get_premium_packages = lambda: get_packages("premium")
+set_premium_packages = lambda p: set_packages("premium", p)
+get_gift_packages    = lambda: get_packages("gift")
+set_gift_packages    = lambda p: set_packages("gift", p)
+
+
+# ─── Nomer narx override-lari ─────────────────────────────────
+async def get_nomer_overrides() -> dict:
+    """Davlat kodiga mos qo'lda belgilangan narxlar: {country_code: price_uzs}"""
+    raw = await get_setting("nomer_price_overrides", "{}")
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+async def set_nomer_override(country_code: str, price: int):
+    overrides = await get_nomer_overrides()
+    overrides[country_code] = price
+    await set_setting("nomer_price_overrides", json.dumps(overrides))
+
+async def remove_nomer_override(country_code: str):
+    overrides = await get_nomer_overrides()
+    overrides.pop(country_code, None)
+    await set_setting("nomer_price_overrides", json.dumps(overrides))
+
+async def get_countries_with_overrides() -> list:
+    """API'dan davlatlarni olib, override narxlarini qo'llaydi."""
+    countries = await fixsim_get_countries()
+    overrides = await get_nomer_overrides()
+    result = []
+    for c in countries:
+        c = dict(c)
+        code = str(c.get("country_code", ""))
+        if code in overrides:
+            c["price_uzs"] = overrides[code]
+            c["price_overridden"] = True
+        else:
+            c["price_overridden"] = False
+        result.append(c)
+    return result
+
+
+# ─── Majburiy obunalar ────────────────────────────────────────
+async def get_forced_channels():
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id,channel_id,channel_title,channel_link FROM forced_channels"
+        ) as c:
+            return [
+                {"id": r[0], "channel_id": r[1], "title": r[2], "link": r[3]}
+                for r in await c.fetchall()
+            ]
+
+async def add_forced_channel(channel_id, title, link):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO forced_channels (channel_id,channel_title,channel_link) VALUES (?,?,?)",
+            (channel_id, title, link),
+        )
+        await db.commit()
+
+async def remove_forced_channel(row_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM forced_channels WHERE id=?", (row_id,))
+        await db.commit()
+
+
+# ─── Buyurtmalar ──────────────────────────────────────────────
+async def create_order(user_id, order_id, order_type, amount, price, recipient='', extra_data=''):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO orders (user_id,order_id,type,amount,price,recipient,extra_data) VALUES (?,?,?,?,?,?,?)",
+            (user_id, order_id, order_type, amount, price, recipient or '', extra_data or ''),
+        )
+        await db.commit()
+
+async def get_order(order_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id,user_id,order_id,type,amount,price,status,recipient,extra_data FROM orders WHERE order_id=?",
+            (order_id,),
+        ) as c:
+            row = await c.fetchone()
+            return (
+                {
+                    "id": row[0], "user_id": row[1], "order_id": row[2],
+                    "type": row[3], "amount": row[4], "price": row[5], "status": row[6],
+                    "recipient": row[7] or "", "extra_data": row[8] or "",
+                }
+                if row else None
+            )
+
+async def update_order_status(order_id, status):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE orders SET status=? WHERE order_id=?", (status, order_id)
+        )
+        await db.commit()
+
+async def try_claim_order(order_id) -> bool:
+    """Atomic: pending → processing. False qaytarsa — allaqachon qayta ishlanayapti."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE orders SET status='processing' WHERE order_id=? AND status IN ('pending','paid')",
+            (order_id,),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+async def get_user_orders(user_id, limit=10):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT order_id,type,amount,price,status,created_at FROM orders "
+            "WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+            (user_id, limit),
+        ) as c:
+            return [
+                {
+                    "order_id": r[0], "type": r[1], "amount": r[2],
+                    "price": r[3], "status": r[4], "created_at": r[5],
+                }
+                for r in await c.fetchall()
+            ]
+
+async def get_stats():
+    async with aiosqlite.connect(DB_PATH) as db:
+        paid = (
+            await (
+                await db.execute(
+                    "SELECT COUNT(*) FROM orders WHERE status IN ('paid','completed')"
+                )
+            ).fetchone()
+        )[0]
+        pending = (
+            await (
+                await db.execute(
+                    "SELECT COUNT(*) FROM orders WHERE status='pending'"
+                )
+            ).fetchone()
+        )[0]
+        revenue = (
+            await (
+                await db.execute(
+                    "SELECT SUM(price) FROM orders WHERE status IN ('paid','completed')"
+                )
+            ).fetchone()
+        )[0] or 0
+        users = (
+            await (await db.execute("SELECT COUNT(*) FROM users")).fetchone()
+        )[0]
+        new_today = (
+            await (
+                await db.execute(
+                    "SELECT COUNT(*) FROM users WHERE joined_at >= date('now','-1 day')"
+                )
+            ).fetchone()
+        )[0]
+        return {
+            "paid": paid, "pending": pending,
+            "revenue": revenue, "users": users, "new_today": new_today,
+        }
+
+
+# ─── Foydalanuvchilar ─────────────────────────────────────────
+async def register_user(user_id, username, full_name):
+    async with aiosqlite.connect(DB_PATH) as db:
+        existing = await (
+            await db.execute(
+                "SELECT user_id FROM users WHERE user_id=?", (user_id,)
+            )
+        ).fetchone()
+        if existing:
+            await db.execute(
+                "UPDATE users SET username=?, full_name=? WHERE user_id=?",
+                (username, full_name, user_id),
+            )
+        else:
+            await db.execute(
+                "INSERT INTO users (user_id,username,full_name) VALUES (?,?,?)",
+                (user_id, username, full_name),
+            )
+        await db.commit()
+        return existing is None
+
+async def get_user(user_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT user_id,username,full_name,balance,joined_at FROM users WHERE user_id=?",
+            (user_id,),
+        ) as c:
+            row = await c.fetchone()
+            return (
+                {
+                    "user_id": row[0], "username": row[1], "full_name": row[2],
+                    "balance": row[3], "joined_at": row[4],
+                }
+                if row else None
+            )
+
+async def get_all_user_ids():
+    async with aiosqlite.connect(DB_PATH) as db:
+        return [
+            r[0]
+            for r in await (
+                await db.execute("SELECT user_id FROM users")
+            ).fetchall()
+        ]
+
+
+# ─── FixSIM flood tekshiruvi (SQLite) ─────────────────────────
+async def fixsim_flood_check(user_id: int, hash_key: str, cooldown: int = 30) -> bool:
+    now = int(time.time())
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT last_checked FROM sms_flood WHERE user_id=? AND hash_key=?",
+            (user_id, hash_key),
+        ) as c:
+            row = await c.fetchone()
+        if row and (now - row[0]) < cooldown:
+            return False
+        await db.execute(
+            "INSERT OR REPLACE INTO sms_flood (user_id, hash_key, last_checked) VALUES (?,?,?)",
+            (user_id, hash_key, now),
+        )
+        await db.commit()
+    return True
+
+
+# ─── Yordamchi funksiyalar ────────────────────────────────────
+def fmt(n):
+    try:
+        return f"{int(float(n)):,}".replace(",", " ")
+    except Exception:
+        return str(n)
+
+def is_success(res):
+    if not isinstance(res, dict):
+        return False
+    val = res.get("success") or res.get("ok")
+    if val is None:
+        return False
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, int):
+        return val != 0
+    if isinstance(val, str):
+        return val.lower() in ("true", "1", "yes", "ok")
+    return bool(val)
+
+def order_status_emoji(status):
+    return {
+        "completed": "✅", "paid": "✅",
+        "pending": "⏳", "expired": "⏰", "cancelled": "❌",
+    }.get(status, "❓")
+
+async def check_subscriptions(bot: Bot, user_id: int):
+    channels = await get_forced_channels()
+    not_sub = []
+    for ch in channels:
+        try:
+            member = await bot.get_chat_member(ch["channel_id"], user_id)
+            if member.status in ("left", "kicked", "banned"):
+                not_sub.append(ch)
+        except Exception:
+            not_sub.append(ch)
+    return not_sub
+
+async def ensure_subscribed(bot: Bot, user_id: int, msg_obj) -> bool:
+    not_sub = await check_subscriptions(bot, user_id)
+    if not_sub:
+        await msg_obj.answer(
+            "⚠️ Botdan foydalanish uchun avval kanallarga obuna bo'ling:",
+            reply_markup=kb_channels(not_sub),
+        )
+        return False
+    return True
+
+async def notify_admin(bot: Bot, title: str, details: str):
+    try:
+        await bot.send_message(
+            ADMIN_ID, f"🚨 <b>{title}</b>\n\n{details}", parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Admin xabarnoma xatosi: {e}")
+
+
+# ─── Hyperpin API ─────────────────────────────────────────────
+_hyperpin_client = None
+
+async def get_hyperpin_client():
+    global _hyperpin_client
+    if not _hyperpin_client or _hyperpin_client.is_closed:
+        _hyperpin_client = httpx.AsyncClient(timeout=30)
+    return _hyperpin_client
+
+async def hyperpin_call(method: str, path: str, json_data: dict = None, params: dict = None, retries=2):
+    for attempt in range(retries + 1):
+        try:
+            client = await get_hyperpin_client()
+            headers = {"X-API-Key": HYPERPIN_API_KEY}
+            if json_data:
+                headers["Content-Type"] = "application/json"
+            res = await client.request(
+                method, f"{HYPERPIN_API_URL}{path}",
+                headers=headers, json=json_data, params=params,
+            )
+            logger.info(f"HYPERPIN {path} [{attempt + 1}]: {res.status_code}")
+            data = res.json()
+            if isinstance(data, dict) and (
+                data.get("success") or "id" in data or "balance" in data
+            ):
+                return {"success": True, **data}
+            if isinstance(data, dict):
+                return {"success": False, "error": data.get("error", "Noma'lum xato"), "code": "api_error"}
+            return data
+        except Exception as e:
+            logger.warning(f"hyperpin_call {path} urinish {attempt + 1} xato: {e}")
+            if attempt < retries:
+                await asyncio.sleep(2)
+    return {"success": False, "error": "Barcha urinishlar muvaffaqiyatsiz", "code": "all_attempts_failed"}
+
+hyperpin_buy_stars     = lambda username, quantity, **kw: hyperpin_call("POST", "/stars/buy",   {"username": username.lstrip("@"), "quantity": int(quantity), **{k: v for k, v in kw.items() if v}})
+hyperpin_buy_premium   = lambda username, months, **kw:   hyperpin_call("POST", "/premium/buy", {"username": username.lstrip("@"), "months": int(months),     **{k: v for k, v in kw.items() if v}})
+hyperpin_buy_gift      = lambda username, gift_id, stars_cost, **kw: hyperpin_call("POST", "/gift/buy", {"username": username.lstrip("@"), "gift_id": gift_id, "stars_cost": int(stars_cost), **{k: v for k, v in kw.items() if v}})
+hyperpin_balance       = lambda: hyperpin_call("GET", "/balance")
+hyperpin_account_stats = lambda: hyperpin_call("GET", "/account/stats")
+hyperpin_deposit       = lambda: hyperpin_call("GET", "/account/deposit")
+
+
+# ─── FixSIM API ───────────────────────────────────────────────
+async def fixsim_request(params: dict) -> dict:
+    url = FIXSIM_API_URL
+    full_params = {"key": FIXSIM_API_KEY, **params}
+    try:
+        async with httpx.AsyncClient(timeout=12, verify=True) as client:
+            res = await client.get(url, params=full_params)
+            data = res.json()
+            return data if isinstance(data, dict) else {}
+    except Exception as e:
+        logger.error(f"FixSIM so'rovi xatosi: {e}")
+        return {}
+
+async def fixsim_get_countries() -> list:
+    res = await fixsim_request({"action": "countries"})
+    return res.get("countries", [])
+
+async def fixsim_buy_number(code: str) -> dict:
+    res = await fixsim_request({"action": "getnum", "code": code})
+    if "error" in res:
+        return {"phone": None, "hash": None, "error": res["error"]}
+    phone = res.get("phone")
+    hash_code = res.get("hash")
+    if not phone or not hash_code:
+        return {"phone": None, "hash": None, "error": "no_number"}
+    return {"phone": phone, "hash": hash_code, "error": None}
+
+async def fixsim_get_sms(hash_code: str) -> dict:
+    res = await fixsim_request({"action": "getsms", "hash": hash_code})
+    if "error" in res:
+        return {"sms": None, "password": None, "error": res["error"]}
+    sms = res.get("sms")
+    password = res.get("password", "")
+    if not sms:
+        return {"sms": None, "password": None, "error": "no_sms"}
+    return {"sms": sms, "password": password, "error": None}
+
+
+# ─── HUMO to'lov tizimi ───────────────────────────────────────
+async def humo_create(user_id, amount):
+    try:
+        async with httpx.AsyncClient(timeout=15, verify=True) as client:
+            res = await client.post(
+                f"{SHOP_API}?action=create_order",
+                json={"shop_id": SHOP_ID, "shop_key": SHOP_KEY,
+                      "amount": float(amount), "user_id": str(user_id)},
+            )
+            return res.json()
+    except Exception as e:
+        logger.error(f"humo_create xatosi: {e}")
+        return {"ok": False, "error": str(e)}
+
+async def humo_check(order_id):
+    try:
+        async with httpx.AsyncClient(timeout=10, verify=True) as client:
+            res = await client.get(
+                SHOP_API,
+                params={"action": "check", "order_id": order_id,
+                        "shop_id": SHOP_ID, "shop_key": SHOP_KEY},
+            )
+            return res.json().get("data")
+    except Exception as e:
+        logger.error(f"humo_check xatosi: {e}")
+        return None
+
+async def create_payment(uid, price, order_type, amount, state, msg_obj, extra_state: dict = None):
+    wait = await msg_obj.answer("⏳ To'lov yaratilmoqda...")
+    res = await humo_create(uid, price)
+    if not res or not res.get("ok"):
+        err = res.get("error", "Server xatosi") if res else "Javob yo'q"
+        await wait.edit_text(
+            f"❌ <b>Xato:</b> {err}\n\nQaytadan /start bosing.", parse_mode="HTML"
+        )
+        await state.clear()
+        return None
+    d = res["data"]
+    oid, fp, card = d["order_id"], int(d["amount"]), d["card_number"]
+    es = extra_state or {}
+    recipient = es.pop("recipient", "")
+    extra_data = json.dumps({k: v for k, v in es.items() if k != "order_id"}) if es else ""
+    await create_order(uid, oid, order_type, amount, fp, recipient=recipient, extra_data=extra_data)
+    upd = {"order_id": oid, "recipient": recipient, **es}
+    await state.update_data(**upd)
+    extra = (
+        f"\n\n⚠️ Farqlash uchun <b>+{d['extra_sum']} so'm</b> qo'shildi."
+        if d.get("extra_sum", 0) > 0 else ""
+    )
+    await wait.edit_text(
+        f"💰 <b>To'lov</b>\n\n"
+        f"🏦 Karta: <code>{card}</code>\n"
+        f"💰 Summa: <b>{fmt(fp)} so'm</b>\n\n"
+        f"📋 1️⃣ Karta raqamini nusxa oling\n"
+        f"2️⃣ Aniq summani o'tkazing\n"
+        f"3️⃣ «✅ To'lov qildim» tugmasini bosing\n\n"
+        f"⏳ Muddat: <b>10 daqiqa</b>{extra}",
+        reply_markup=kb_payment(oid, card, fp),
+        parse_mode="HTML",
+    )
+    return oid
+
+
+# ─── Klaviaturalar ────────────────────────────────────────────
+def kb_main(stars_on=True, premium_on=True, gift_on=True, nomer_on=True):
+    rows = []
+    if stars_on:
+        rows.append([KeyboardButton(text="⭐ Telegram Stars sotib olish")])
+    if premium_on:
+        rows.append([KeyboardButton(text="💎 Telegram Premium sotib olish")])
+    if gift_on:
+        rows.append([KeyboardButton(text="🎁 Telegram Gift yuborish")])
+    if nomer_on:
+        rows.append([KeyboardButton(text="📞 Telegram nomer olish")])
+    rows.append([KeyboardButton(text="📦 Buyurtmalarim"), KeyboardButton(text="👤 Profilim")])
+    rows.append([KeyboardButton(text="ℹ️ Yordam")])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+def kb_admin():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📊 Statistika")],
+            [KeyboardButton(text="⭐ Stars narxlari"), KeyboardButton(text="💎 Premium narxlari")],
+            [KeyboardButton(text="🎁 Gift narxlari"),  KeyboardButton(text="📞 Nomer narxlari")],
+            [KeyboardButton(text="📢 Majburiy obuna"), KeyboardButton(text="⚙️ Bot sozlamalari")],
+            [KeyboardButton(text="📣 Xabar yuborish"), KeyboardButton(text="💰 Hyperpin")],
+            [KeyboardButton(text="🔙 Asosiy menyu")],
+        ],
+        resize_keyboard=True,
+    )
+
+def _pkg_btns(packages, prefix, name_key, value_key):
+    return [
+        [InlineKeyboardButton(
+            text=f"{p[name_key]} — {fmt(p[value_key])} so'm",
+            callback_data=f"{prefix}:{i}",
+        )]
+        for i, p in enumerate(packages)
+    ]
+
+def kb_stars(packages):
+    return InlineKeyboardMarkup(
+        inline_keyboard=_pkg_btns(packages, "stars_buy", "stars", "price")
+        + [[InlineKeyboardButton(text="✏️ O'zim yozaman", callback_data="stars_custom")]]
+        + [[InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_main")]]
+    )
+
+def kb_premium(packages):
+    return InlineKeyboardMarkup(
+        inline_keyboard=_pkg_btns(packages, "premium_buy", "label", "price")
+        + [[InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_main")]]
+    )
+
+def kb_gift(packages):
+    return InlineKeyboardMarkup(
+        inline_keyboard=_pkg_btns(packages, "gift_buy", "name", "price")
+        + [[InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_main")]]
+    )
+
+def kb_payment(order_id, card, amount):
+    card_copy = card.replace(" ", "")
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"📋 {card}", copy_text=CopyTextButton(text=card_copy))],
+            [InlineKeyboardButton(text=f"💰 {fmt(amount)} so'm", copy_text=CopyTextButton(text=str(amount)))],
+            [InlineKeyboardButton(text="✅ To'lov qildim", callback_data=f"check_pay:{order_id}")],
+            [InlineKeyboardButton(text="❌ Bekor qilish", callback_data=f"cancel_pay:{order_id}")],
+        ]
+    )
+
+def kb_channels(channels):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"📢 {ch['title']}", url=ch["link"])]
+            for ch in channels
+        ]
+        + [[InlineKeyboardButton(text="✅ Obuna bo'ldim", callback_data="check_sub")]]
+    )
+
+def kb_fixsim_countries(countries: list, page: int):
+    per_page = 10
+    total = len(countries)
+    total_pages = max(1, -(-total // per_page))
+    page = max(0, min(page, total_pages - 1))
+    start = page * per_page
+    chunk = countries[start : start + per_page]
+
+    rows = []
+    for c in chunk:
+        code = c.get("country_code", "")
+        name = c.get("country_name", code)
+        price = int(c.get("price_uzs", 0))
+        if not code or price <= 0:
+            continue
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{name} — {fmt(price)} so'm",
+                callback_data=f"fs_buy:{code}:{name[:30]}",
+            )
+        ])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ Oldingi", callback_data=f"fs_page:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="none"))
+    if (start + per_page) < total:
+        nav.append(InlineKeyboardButton(text="Keyingi ➡️", callback_data=f"fs_page:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([
+        InlineKeyboardButton(text="📊 TOP 10",   callback_data="fs_top10"),
+        InlineKeyboardButton(text="💰 Arzonlar", callback_data="fs_cheap"),
+    ])
+    rows.append([InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def kb_fixsim_list(countries: list, back_cb: str = "fs_start"):
+    rows = []
+    for c in countries:
+        code = c.get("country_code", "")
+        name = c.get("country_name", code)
+        price = int(c.get("price_uzs", 0))
+        if not code or price <= 0:
+            continue
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{name} — {fmt(price)} so'm",
+                callback_data=f"fs_buy:{code}:{name[:30]}",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="🔙 Orqaga", callback_data=back_cb)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def kb_admin_nomer_overrides(overrides: dict, countries: list):
+    """Override qilingan davlatlar ro'yxati + yangi qo'shish tugmasi."""
+    name_map = {str(c.get("country_code", "")): c.get("country_name", "") for c in countries}
+    rows = []
+    for code, price in overrides.items():
+        name = name_map.get(code, code)
+        rows.append([
+            InlineKeyboardButton(
+                text=f"✏️ {name} — {fmt(price)} so'm",
+                callback_data=f"nomer_edit:{code}",
+            ),
+            InlineKeyboardButton(
+                text="🗑",
+                callback_data=f"nomer_del:{code}",
+            ),
+        ])
+    rows.append([InlineKeyboardButton(text="➕ Yangi narx belgilash", callback_data="nomer_add")])
+    rows.append([InlineKeyboardButton(text="🔙 Admin panel", callback_data="admin_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def kb_admin_nomer_country_select(countries: list, page: int, action: str = "nomer_set_country"):
+    """Davlat tanlash sahifalash klaviaturasi (admin uchun)."""
+    per_page = 10
+    total = len(countries)
+    total_pages = max(1, -(-total // per_page))
+    page = max(0, min(page, total_pages - 1))
+    start = page * per_page
+    chunk = countries[start : start + per_page]
+
+    rows = []
+    for c in chunk:
+        code = str(c.get("country_code", ""))
+        name = c.get("country_name", code)
+        api_price = int(c.get("price_uzs", 0))
+        override = c.get("price_overridden", False)
+        mark = " ✏️" if override else ""
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{name}{mark} — {fmt(api_price)} so'm",
+                callback_data=f"{action}:{code}:{name[:30]}",
+            )
+        ])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"nomer_cpage:{page - 1}:{action}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="none"))
+    if (start + per_page) < total:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"nomer_cpage:{page + 1}:{action}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="🔙 Orqaga", callback_data="admin_nomer_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ─── Admin klaviaturalar ──────────────────────────────────────
+def _admin_edit_kb(packages, prefix, name_key, value_key, add_cb, del_cb):
+    rows = [
+        [InlineKeyboardButton(
+            text=f"{p[name_key]} → {fmt(p[value_key])} so'm",
+            callback_data=f"edit_{prefix}:{i}",
+        )]
+        for i, p in enumerate(packages)
+    ]
+    rows.append([
+        InlineKeyboardButton(text="➕ Yangi paket", callback_data=add_cb),
+        InlineKeyboardButton(text="🗑 O'chirish",   callback_data=del_cb),
+    ])
+    rows.append([InlineKeyboardButton(text="🔙 Admin panel", callback_data="admin_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def _admin_del_kb(packages, prefix, label_key):
+    rows = [
+        [InlineKeyboardButton(
+            text=f"❌ {p[label_key]}",
+            callback_data=f"del_{prefix}:{i}",
+        )]
+        for i, p in enumerate(packages)
+    ]
+    rows.append([InlineKeyboardButton(text="🔙 Orqaga", callback_data="admin_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+kb_admin_stars   = lambda p: _admin_edit_kb(p, "stars",   "stars", "price", "add_stars_pkg",   "del_stars_menu")
+kb_del_stars     = lambda p: _admin_del_kb(p, "stars",   "stars")
+kb_admin_premium = lambda p: _admin_edit_kb(p, "premium", "label", "price", "add_premium_pkg", "del_premium_menu")
+kb_del_premium   = lambda p: _admin_del_kb(p, "premium", "label")
+kb_admin_gifts   = lambda p: _admin_edit_kb(p, "gift",    "name",  "price", "add_gift_pkg",    "del_gift_menu")
+kb_del_gifts     = lambda p: _admin_del_kb(p, "gift",    "name")
+
+def kb_admin_channels(channels):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"❌ {ch['title']}", callback_data=f"del_channel:{ch['id']}")]
+            for ch in channels
+        ]
+        + [
+            [InlineKeyboardButton(text="➕ Kanal qo'shish", callback_data="add_channel")],
+            [InlineKeyboardButton(text="🔙 Admin panel",    callback_data="admin_back")],
+        ]
+    )
+
+
+# ─── FSM holatlari ────────────────────────────────────────────
+class ShopSt(StatesGroup):
+    stars_recipient   = State()
+    stars_custom      = State()
+    stars_pay         = State()
+    premium_recipient = State()
+    premium_pay       = State()
+    gift_recipient    = State()
+    gift_pay          = State()
+    nomer_pay         = State()
+
+class AdminSt(StatesGroup):
+    edit_price          = State()
+    add_stars_value     = State()
+    add_stars_price     = State()
+    add_premium_value   = State()
+    add_premium_label   = State()
+    add_premium_price   = State()
+    add_gift_id         = State()
+    add_gift_name       = State()
+    add_gift_stars      = State()
+    add_gift_price      = State()
+    add_ch_id           = State()
+    add_ch_title        = State()
+    add_ch_link         = State()
+    edit_welcome        = State()
+    broadcast           = State()
+    # Nomer narxlari
+    nomer_set_price     = State()
+
+
+# ─── Routerlar ────────────────────────────────────────────────
+r_common = Router()
+r_admin  = Router()
+r_start  = Router()
+r_shop   = Router()
+r_fixsim = Router()
+
+
+# ─── /cancel ──────────────────────────────────────────────────
+@r_common.message(Command("cancel"))
+@r_common.message(StateFilter("*"), F.text.casefold() == "bekor")
+async def cmd_cancel(msg: Message, state: FSMContext):
+    cur = await state.get_state()
+    await state.clear()
+    text = "Bekor qilinadigan narsa yo'q. /start bosing." if cur is None else "❌ Bekor qilindi. /start bosing."
+    await msg.answer(text)
+
+
+# ─── /start ───────────────────────────────────────────────────
+@r_start.message(Command("start"))
+async def cmd_start(msg: Message, state: FSMContext, bot: Bot):
+    await state.clear()
+    uid = msg.from_user.id
+    await register_user(uid, msg.from_user.username or "", msg.from_user.full_name or "")
+    if uid == ADMIN_ID:
+        await msg.answer("👋 Xush kelibsiz, Admin!\n\nAdmin panelga: /admin", reply_markup=kb_main())
+        return
+    not_sub = await check_subscriptions(bot, uid)
+    if not_sub:
+        await msg.answer(
+            "⚠️ <b>Botdan foydalanish uchun kanallarga obuna bo'ling:</b>",
+            reply_markup=kb_channels(not_sub), parse_mode="HTML",
+        )
+        return
+    welcome = await get_setting("welcome_text", "Xush kelibsiz!")
+    s = {
+        "stars_enabled":   await get_setting("stars_enabled",   "1"),
+        "premium_enabled": await get_setting("premium_enabled", "1"),
+        "gift_enabled":    await get_setting("gift_enabled",    "1"),
+        "nomer_enabled":   await get_setting("nomer_enabled",   "1"),
+    }
+    await msg.answer(
+        f"👋 {welcome}",
+        reply_markup=kb_main(
+            s["stars_enabled"] == "1", s["premium_enabled"] == "1",
+            s["gift_enabled"] == "1",  s["nomer_enabled"] == "1",
+        ),
+        parse_mode="HTML",
+    )
+
+@r_start.callback_query(F.data == "check_sub")
+async def check_sub_cb(call: CallbackQuery, bot: Bot):
+    not_sub = await check_subscriptions(bot, call.from_user.id)
+    if not_sub:
+        await call.answer("⚠️ Hali barcha kanallarga obuna bo'lmadingiz!", show_alert=True)
+        return
+    await call.message.delete()
+    s = {
+        "stars_enabled":   await get_setting("stars_enabled",   "1"),
+        "premium_enabled": await get_setting("premium_enabled", "1"),
+        "gift_enabled":    await get_setting("gift_enabled",    "1"),
+        "nomer_enabled":   await get_setting("nomer_enabled",   "1"),
+    }
+    welcome = await get_setting("welcome_text", "Xush kelibsiz!")
+    await call.message.answer(
+        f"✅ Rahmat!\n\n👋 {welcome}",
+        reply_markup=kb_main(
+            s["stars_enabled"] == "1", s["premium_enabled"] == "1",
+            s["gift_enabled"] == "1",  s["nomer_enabled"] == "1",
+        ),
+        parse_mode="HTML",
+    )
+
+@r_start.callback_query(F.data == "back_main")
+async def back_main(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await call.answer()
+
+@r_start.message(F.text == "ℹ️ Yordam")
+async def help_msg(msg: Message):
+    await msg.answer(
+        "ℹ️ <b>Yordam</b>\n\n"
+        "Bu bot orqali Telegram xizmatlarini qulay sotib olasiz:\n\n"
+        "⭐ <b>Stars</b> — istalgan akkauntga yuboriladi\n"
+        "💎 <b>Premium</b> — username orqali avtomatik faollashadi\n"
+        "🎁 <b>Gift</b> — do'stingizga sovg'a yuboring\n"
+        "📞 <b>Nomer</b> — oldindan ro'yxatdan o'tkazilgan akkauntlar\n\n"
+        "💳 <b>To'lov:</b> HUMO karta orqali avtomatik\n\n"
+        "❓ Muammo bo'lsa admin bilan bog'laning.",
+        parse_mode="HTML",
+    )
+
+
+# ─── Profil ───────────────────────────────────────────────────
+@r_start.message(F.text == "👤 Profilim")
+async def profile_msg(msg: Message):
+    uid = msg.from_user.id
+    user = await get_user(uid)
+    if not user:
+        await register_user(uid, msg.from_user.username or "", msg.from_user.full_name or "")
+        user = await get_user(uid)
+    joined = user["joined_at"][:10] if user and user.get("joined_at") else "—"
+    await msg.answer(
+        f"👤 <b>Profilingiz</b>\n\n"
+        f"🆔 ID: <code>{uid}</code>\n"
+        f"👤 Ism: {msg.from_user.full_name}\n"
+        f"📅 Ro'yxatdan o'tgan: {joined}\n\n"
+        f"💰 Balans: <b>{fmt(user['balance'] if user else 0)} so'm</b>",
+        parse_mode="HTML",
+    )
+
+
+# ─── Buyurtmalar ──────────────────────────────────────────────
+@r_shop.message(F.text == "📦 Buyurtmalarim")
+async def my_orders(msg: Message):
+    orders = await get_user_orders(msg.from_user.id, limit=10)
+    if not orders:
+        await msg.answer("📦 Sizda hali buyurtma yo'q.")
+        return
+    type_labels = {"stars": "⭐ Stars", "premium": "💎 Premium", "gift": "🎁 Gift", "nomer": "📞 Nomer"}
+    lines = ["📦 <b>So'nggi buyurtmalar:</b>\n"]
+    for o in orders:
+        e = order_status_emoji(o["status"])
+        t = type_labels.get(o["type"], o["type"])
+        if o["type"] == "stars":
+            a = f"{o['amount']} Stars"
+        elif o["type"] == "premium":
+            a = f"{o['amount']} oy"
+        elif o["type"] == "gift":
+            a = f"{o['amount']} stars"
+        else:
+            a = str(o["amount"])
+        d = o["created_at"][:10] if o["created_at"] else "—"
+        lines.append(f"{e} #{o['order_id']} | {t} | {a}\n   💰 {fmt(o['price'])} so'm | {d}\n")
+    await msg.answer("\n".join(lines), parse_mode="HTML")
+
+
+# ─── Obuna va yoqilgan tekshiruvi ─────────────────────────────
+async def _check_sub_and_enabled(bot, msg, setting_key, disabled_msg):
+    if not await ensure_subscribed(bot, msg.from_user.id, msg):
+        return False
+    if (await get_setting(setting_key, "1")) != "1":
+        await msg.answer(disabled_msg)
+        return False
+    return True
+
+
+# ─── ⭐ Stars ─────────────────────────────────────────────────
+@r_shop.message(F.text == "⭐ Telegram Stars sotib olish")
+async def stars_menu(msg: Message, state: FSMContext, bot: Bot):
+    if not await _check_sub_and_enabled(bot, msg, "stars_enabled", "⭐ Stars xizmati vaqtincha to'xtatilgan."):
+        return
+    await state.set_state(ShopSt.stars_recipient)
+    await msg.answer(
+        "⭐ <b>Telegram Stars</b>\n\n"
+        "👤 Qabul qiluvchining <b>@username</b> ini kiriting:\n\n"
+        "<i>Masalan: @durov</i>\n\n"
+        "💡 Faqat @username qabul qilinadi (Telegram ID emas).\n\n"
+        "Bekor qilish: /cancel",
+        parse_mode="HTML",
+    )
+
+@r_shop.message(ShopSt.stars_recipient)
+async def stars_recipient_input(msg: Message, state: FSMContext):
+    raw = msg.text.strip() if msg.text else ""
+    if not raw.startswith("@"):
+        await msg.answer(
+            "⚠️ <b>Noto'g'ri format!</b>\n\n"
+            "Faqat <b>@username</b> ko'rinishida kiriting.\n"
+            "<i>Masalan: @durov</i>\n\n"
+            "💡 Telegram ID qabul qilinmaydi — faqat @username kerak.\n\n"
+            "Bekor qilish: /cancel",
+            parse_mode="HTML",
+        )
+        return
+    await state.update_data(recipient=raw)
+    await msg.answer(
+        f"✅ Qabul qiluvchi: <b>{raw}</b>\n\n⭐ <b>Paket tanlang:</b>",
+        reply_markup=kb_stars(await get_stars_packages()), parse_mode="HTML",
+    )
+
+@r_shop.callback_query(F.data.startswith("stars_buy:"))
+async def stars_buy(call: CallbackQuery, state: FSMContext, bot: Bot):
+    if not await ensure_subscribed(bot, call.from_user.id, call.message):
+        return await call.answer()
+    idx = int(call.data.split(":")[1])
+    pkgs = await get_stars_packages()
+    if idx >= len(pkgs):
+        await call.answer("Paket topilmadi!", show_alert=True)
+        return
+    p = pkgs[idx]
+    data = await state.get_data()
+    await _start_stars_pay(call.message, call.from_user.id, p["stars"], p["price"], state, data.get("recipient", str(call.from_user.id)))
+    await call.answer()
+
+@r_shop.callback_query(F.data == "stars_custom")
+async def stars_custom(call: CallbackQuery, state: FSMContext):
+    await state.set_state(ShopSt.stars_custom)
+    await call.message.answer(
+        "✏️ Nechta Stars xohlaysiz?\n\n<i>Minimal: 50 | Maksimal: 1 000 000</i>\n\nBekor qilish: /cancel",
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+@r_shop.message(ShopSt.stars_custom)
+async def stars_custom_input(msg: Message, state: FSMContext):
+    raw = (msg.text or "").strip().replace(" ", "")
+    if not raw.isdigit() or not (50 <= int(raw) <= 1000000):
+        await msg.answer("⚠️ 50 dan 1 000 000 gacha raqam kiriting.")
+        return
+    stars = int(raw)
+    pkgs = await get_stars_packages()
+    pps = round(pkgs[0]["price"] / pkgs[0]["stars"]) if pkgs else 280
+    data = await state.get_data()
+    await _start_stars_pay(msg, msg.from_user.id, stars, int(stars * pps), state, data.get("recipient", str(msg.from_user.id)))
+
+async def _start_stars_pay(msg_obj, uid, stars, price, state, recipient=None):
+    oid = await create_payment(uid, price, "stars", stars, state, msg_obj, {"stars": stars, "recipient": recipient or str(uid)})
+    if oid:
+        await state.set_state(ShopSt.stars_pay)
+
+
+# ─── 💎 Premium ───────────────────────────────────────────────
+@r_shop.message(F.text == "💎 Telegram Premium sotib olish")
+async def premium_menu(msg: Message, state: FSMContext, bot: Bot):
+    if not await _check_sub_and_enabled(bot, msg, "premium_enabled", "💎 Premium xizmati vaqtincha to'xtatilgan."):
+        return
+    await state.set_state(ShopSt.premium_recipient)
+    await msg.answer(
+        "💎 <b>Telegram Premium</b>\n\n"
+        "👤 Premium kimga faollashtirilsin?\n"
+        "<b>@username</b> sini kiriting:\n\n"
+        "<i>Masalan: @username</i>\n\n"
+        "💡 O'zingizga olmoqchi bo'lsangiz — o'z @username ingizni kiriting.\n\n"
+        "Bekor qilish: /cancel",
+        parse_mode="HTML",
+    )
+
+@r_shop.message(ShopSt.premium_recipient)
+async def premium_recipient_input(msg: Message, state: FSMContext):
+    raw = (msg.text or "").strip()
+    if not raw.startswith("@"):
+        await msg.answer(
+            "⚠️ Noto'g'ri format!\n@username ko'rinishida kiriting.\n\n"
+            "<i>Masalan: @username</i>",
+            parse_mode="HTML",
+        )
+        return
+    await state.update_data(recipient=raw)
+    await msg.answer(
+        f"✅ Qabul qiluvchi: <b>{raw}</b>\n\n💎 <b>Muddatni tanlang:</b>",
+        reply_markup=kb_premium(await get_premium_packages()), parse_mode="HTML",
+    )
+
+@r_shop.callback_query(F.data.startswith("premium_buy:"))
+async def premium_buy(call: CallbackQuery, state: FSMContext, bot: Bot):
+    if not await ensure_subscribed(bot, call.from_user.id, call.message):
+        return await call.answer()
+    idx = int(call.data.split(":")[1])
+    pkgs = await get_premium_packages()
+    if idx >= len(pkgs):
+        await call.answer("Paket topilmadi!", show_alert=True)
+        return
+    p = pkgs[idx]
+    data = await state.get_data()
+    recipient = data.get("recipient", "")
+    if not recipient:
+        await call.answer("❌ Avval @username kiriting!", show_alert=True)
+        await state.set_state(ShopSt.premium_recipient)
+        await call.message.answer(
+            "💎 Premium kimga faollashtirilsin?\n<b>@username</b> sini kiriting:",
+            parse_mode="HTML",
+        )
+        return
+    oid = await create_payment(
+        call.from_user.id, p["price"], "premium", p["months"], state, call.message,
+        {"months": p["months"], "recipient": recipient},
+    )
+    if oid:
+        await state.set_state(ShopSt.premium_pay)
+    await call.answer()
+
+
+# ─── 🎁 Gift ──────────────────────────────────────────────────
+@r_shop.message(F.text == "🎁 Telegram Gift yuborish")
+async def gift_menu(msg: Message, state: FSMContext, bot: Bot):
+    if not await _check_sub_and_enabled(bot, msg, "gift_enabled", "🎁 Gift xizmati vaqtincha to'xtatilgan."):
+        return
+    await state.set_state(ShopSt.gift_recipient)
+    await msg.answer(
+        "🎁 <b>Telegram Gift</b>\n\n"
+        "👤 Qabul qiluvchining <b>@username</b> sini kiriting:\n\n"
+        "<i>Masalan: @username</i>\n\nBekor qilish: /cancel",
+        parse_mode="HTML",
+    )
+
+@r_shop.message(ShopSt.gift_recipient)
+async def gift_recipient_input(msg: Message, state: FSMContext):
+    raw = (msg.text or "").strip()
+    if not raw.startswith("@"):
+        await msg.answer("⚠️ Noto'g'ri format!\n@username ko'rinishida kiriting.", parse_mode="HTML")
+        return
+    await state.update_data(recipient=raw)
+    await msg.answer(
+        f"✅ Qabul qiluvchi: <b>{raw}</b>\n\n🎁 <b>Gift tanlang:</b>",
+        reply_markup=kb_gift(await get_gift_packages()), parse_mode="HTML",
+    )
+
+@r_shop.callback_query(F.data.startswith("gift_buy:"))
+async def gift_buy(call: CallbackQuery, state: FSMContext, bot: Bot):
+    if not await ensure_subscribed(bot, call.from_user.id, call.message):
+        return await call.answer()
+    idx = int(call.data.split(":")[1])
+    pkgs = await get_gift_packages()
+    if idx >= len(pkgs):
+        await call.answer("Gift topilmadi!", show_alert=True)
+        return
+    p = pkgs[idx]
+    data = await state.get_data()
+    oid = await create_payment(
+        call.from_user.id, p["price"], "gift", p["stars_cost"], state, call.message,
+        {"gift_idx": idx, "recipient": data.get("recipient", str(call.from_user.id))},
+    )
+    if oid:
+        await state.set_state(ShopSt.gift_pay)
+    await call.answer()
+
+
+# ─── To'lovni tekshirish ──────────────────────────────────────
+@r_shop.callback_query(F.data.startswith("check_pay:"))
+async def check_pay(call: CallbackQuery, state: FSMContext, bot: Bot):
+    oid = int(call.data.split(":")[1])
+    d = await humo_check(oid)
+    if not d:
+        await call.answer("⚠️ Server javob bermadi. Qaytadan bosing.", show_alert=True)
+        return
+    status = d.get("status", "")
+    secs = int(d.get("seconds_left", 0))
+
+    if status == "paid":
+        if not await try_claim_order(oid):
+            await call.answer(
+                "⚠️ Bu buyurtma allaqachon qayta ishlanmoqda. Biroz kuting.",
+                show_alert=True,
+            )
+            return
+        order = await get_order(oid)
+        if not order:
+            await call.answer("Buyurtma topilmadi!", show_alert=True)
+            return
+        await call.message.edit_text("⏳ To'lov tasdiqlandi! Mahsulot yuborilmoqda...")
+
+        db_recipient = order.get("recipient", "")
+        db_extra = {}
+        if order.get("extra_data"):
+            try:
+                db_extra = json.loads(order["extra_data"])
+            except Exception:
+                db_extra = {}
+
+        if order["type"] == "stars":
+            stars_amount = int(order["amount"])
+            recipient = db_recipient or str(call.from_user.id)
+            username = recipient.lstrip("@")
+            res = await hyperpin_buy_stars(username=username, quantity=stars_amount)
+            logger.info(f"HYPERPIN STARS: {res} | username={username}")
+            if is_success(res):
+                await update_order_status(oid, "completed")
+                await call.message.edit_text(
+                    f"✅ <b>Muvaffaqiyatli!</b>\n\n"
+                    f"👤 Qabul qiluvchi: <b>@{username}</b>\n"
+                    f"⭐ <b>{stars_amount} Telegram Stars</b> yuborildi!\n"
+                    f"🧾 Buyurtma: <code>#{oid}</code>",
+                    parse_mode="HTML",
+                )
+            else:
+                err = res.get("error", "Noma'lum xato") if isinstance(res, dict) else str(res)
+                code = res.get("code", "unknown") if isinstance(res, dict) else "unknown"
+                logger.error(f"Stars xatosi | order={oid} | {res}")
+                await call.message.edit_text(
+                    f"✅ To'lov qabul qilindi!\n⭐ Stars tez orada yuboriladi.\n🧾 Buyurtma: <code>#{oid}</code>",
+                    parse_mode="HTML",
+                )
+                await notify_admin(bot, "Stars yuborilmadi!",
+                    f"💳 Xaridor: <code>{call.from_user.id}</code>\n"
+                    f"👤 Qabul: <b>@{username}</b>\n"
+                    f"⭐ Miqdor: <b>{stars_amount}</b>\n"
+                    f"🧾 Order: <code>#{oid}</code>\n"
+                    f"⚠️ Xato: <code>{err}</code> | Code: <code>{code}</code>")
+
+        elif order["type"] == "premium":
+            months = int(order["amount"])
+            recipient = db_recipient or ""
+            username = recipient.lstrip("@") if recipient else ""
+            if not username:
+                await call.message.edit_text(
+                    "❌ Premium uchun @username topilmadi.\nAdmin bilan bog'laning.",
+                    parse_mode="HTML",
+                )
+                await notify_admin(bot, "Premium: recipient yo'q!",
+                    f"👤 User: <code>{call.from_user.id}</code>\n"
+                    f"💎 Muddat: <b>{months} oy</b>\n"
+                    f"🧾 Order: <code>#{oid}</code>")
+                return
+            res = await hyperpin_buy_premium(username=username, months=months)
+            if is_success(res):
+                await update_order_status(oid, "completed")
+                await call.message.edit_text(
+                    f"✅ <b>Muvaffaqiyatli!</b>\n\n"
+                    f"👤 Qabul: <b>@{username}</b>\n"
+                    f"💎 <b>Telegram Premium ({months} oy)</b> faollashtirildi!\n"
+                    f"🧾 Buyurtma: <code>#{oid}</code>",
+                    parse_mode="HTML",
+                )
+            else:
+                err = res.get("error", "Noma'lum xato") if isinstance(res, dict) else str(res)
+                code = res.get("code", "unknown") if isinstance(res, dict) else "unknown"
+                logger.error(f"Premium xatosi | order={oid} | {res}")
+                await call.message.edit_text(
+                    f"✅ To'lov qabul qilindi!\n💎 Premium tez orada faollashtiriladi.\n🧾 Buyurtma: <code>#{oid}</code>",
+                    parse_mode="HTML",
+                )
+                await notify_admin(bot, "Premium yuborilmadi!",
+                    f"👤 User: <code>{call.from_user.id}</code> @{username}\n"
+                    f"💎 Muddat: <b>{months} oy</b>\n"
+                    f"🧾 Order: <code>#{oid}</code>\n"
+                    f"⚠️ Xato: <code>{err}</code> | Code: <code>{code}</code>")
+
+        elif order["type"] == "gift":
+            stars_cost = int(order["amount"])
+            recipient = db_recipient or str(call.from_user.id)
+            gift_idx = db_extra.get("gift_idx", 0)
+            pkgs = await get_gift_packages()
+            if gift_idx < len(pkgs):
+                p = pkgs[gift_idx]
+                username = recipient.lstrip("@")
+                res = await hyperpin_buy_gift(username=username, gift_id=p["gift_id"], stars_cost=stars_cost)
+                if is_success(res):
+                    await update_order_status(oid, "completed")
+                    await call.message.edit_text(
+                        f"✅ <b>Muvaffaqiyatli!</b>\n\n"
+                        f"👤 Qabul: <b>@{username}</b>\n"
+                        f"🎁 <b>{p['name']}</b> yuborildi!\n"
+                        f"🧾 Buyurtma: <code>#{oid}</code>",
+                        parse_mode="HTML",
+                    )
+                else:
+                    err = res.get("error", "Noma'lum xato") if isinstance(res, dict) else str(res)
+                    code = res.get("code", "unknown") if isinstance(res, dict) else "unknown"
+                    logger.error(f"Gift xatosi | order={oid} | {res}")
+                    await call.message.edit_text(
+                        f"✅ To'lov qabul qilindi!\n🎁 Gift tez orada yuboriladi.\n🧾 Buyurtma: <code>#{oid}</code>",
+                        parse_mode="HTML",
+                    )
+                    await notify_admin(bot, "Gift yuborilmadi!",
+                        f"💳 Xaridor: <code>{call.from_user.id}</code>\n"
+                        f"👤 Qabul: <b>@{username}</b>\n"
+                        f"🎁 Gift: <b>{p['name']}</b>\n"
+                        f"🧾 Order: <code>#{oid}</code>\n"
+                        f"⚠️ Xato: <code>{err}</code> | Code: <code>{code}</code>")
+            else:
+                logger.error(f"Gift paket topilmadi idx={gift_idx}")
+                await call.message.edit_text(
+                    f"✅ To'lov qabul qilindi!\n🎁 Gift tez orada yuboriladi.\n🧾 Buyurtma: <code>#{oid}</code>",
+                    parse_mode="HTML",
+                )
+
+        elif order["type"] == "nomer":
+            c_code = db_extra.get("country_code", "")
+            c_name = db_extra.get("country_name", c_code)
+            price_uzs = order["price"]
+            if not c_code:
+                await call.message.edit_text(
+                    "❌ Davlat ma'lumotlari topilmadi. Admin bilan bog'laning.",
+                    parse_mode="HTML",
+                )
+                await notify_admin(bot, "Nomer: country_code yo'q!",
+                    f"👤 User: <code>{call.from_user.id}</code>\n"
+                    f"🧾 Order: <code>#{oid}</code>")
+                return
+            result = await fixsim_buy_number(c_code)
+            if result["error"]:
+                await call.message.edit_text(
+                    "<b>⛔️ To'lov qabul qilindi, lekin raqam qolmagan.</b>\n\n"
+                    "Admin bilan bog'laning — puliz qaytariladi.",
+                    parse_mode="HTML",
+                )
+                await notify_admin(bot, "Nomer ajratilmadi (to'lov o'tdi)!",
+                    f"👤 User: <code>{call.from_user.id}</code>\n"
+                    f"🌍 Davlat: <b>{c_name}</b> (<code>{c_code}</code>)\n"
+                    f"💰 To'lov: <b>{fmt(price_uzs)} so'm</b>\n"
+                    f"🧾 Order: <code>#{oid}</code>\n"
+                    f"⚠️ Xato: <code>{result['error']}</code>")
+                return
+            phone = result["phone"]
+            hash_code = result["hash"]
+            await update_order_status(oid, "completed")
+            await call.message.edit_text(
+                "✅ <b>To'lov tasdiqlandi, raqam ajratildi!</b>",
+                parse_mode="HTML",
+            )
+            await call.message.answer(
+                "<b>✅ Raqam muvaffaqiyatli olindi!</b>\n\n"
+                "<blockquote>"
+                f"📞 Raqamingiz:  <code>{phone}</code>\n"
+                f"🌍 Davlat:      {c_name}\n"
+                f"💵 Narxi:       <code>{fmt(price_uzs)}</code> so'm"
+                "</blockquote>\n\n"
+                "<blockquote>"
+                "⚠️ Bu raqam bilan Telegramning rasmiy ilovasidan kirmang!\n"
+                "📱 Nicegram, Plus Messenger kabi norasmiy ilovalardan foydalaning.\n"
+                "💡 Kodni olish uchun quyidagi tugmani bosing."
+                "</blockquote>",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔢 SMS kodni olish", callback_data=f"fs_sms:{hash_code}")],
+                ]),
+                parse_mode="HTML",
+            )
+
+        await state.clear()
+
+    elif status in ("expired", "cancelled") or secs <= 0:
+        await update_order_status(oid, "expired")
+        await call.answer("⏰ Muddat tugadi. Qaytadan urinib ko'ring.", show_alert=True)
+        await call.message.edit_text(
+            "⏰ <b>To'lov muddati tugadi.</b>\n\nQaytadan /start bosing.",
+            parse_mode="HTML", reply_markup=None,
+        )
+        await state.clear()
+    else:
+        m, s = secs // 60, secs % 60
+        text = f"⏳ Hali tasdiqlanmadi. ~{m} daqiqa {s} soniya qoldi." if m else f"⏳ Hali tasdiqlanmadi. ~{s} soniya qoldi."
+        await call.answer(text, show_alert=True)
+
+@r_shop.callback_query(F.data.startswith("cancel_pay:"))
+async def cancel_pay(call: CallbackQuery, state: FSMContext):
+    await update_order_status(int(call.data.split(":")[1]), "cancelled")
+    await state.clear()
+    await call.message.edit_text("❌ To'lov bekor qilindi.")
+
+
+# ─── 📞 FixSIM — Telegram nomer olish ────────────────────────
+@r_fixsim.message(F.text == "📞 Telegram nomer olish")
+async def fixsim_start_msg(msg: Message, bot: Bot):
+    if not await _check_sub_and_enabled(bot, msg, "nomer_enabled", "📞 Nomer xizmati vaqtincha to'xtatilgan."):
+        return
+    await msg.answer(
+        "<b>📶 Tayyor Telegram akkauntlar</b> — oldindan ro'yxatdan o'tkazilgan, "
+        "tekshiruvdan o'tgan va cheklovlarsiz akkauntlar!\n\n"
+        "<b>📌 Ishlash tartibi:</b>\n\n"
+        "<blockquote>"
+        "1️⃣ Bot sizga raqam beradi.\n"
+        "2️⃣ Shu raqam bilan Telegramga kiring — rasmiy ko'k ilovadan foydalanmang!\n"
+        "3️⃣ Telegram kod so'raganda <b>SMS kodni olish</b> tugmasini bosing.\n"
+        "4️⃣ 1–3 daqiqada kirish kodi va 2 bosqichli parol beriladi.\n"
+        "5️⃣ Muammo bo'lsa — Yordam bo'limiga murojaat qiling.\n\n"
+        "⚠️ Raqamni olganingizdan so'ng uni bekor qilish imkonsiz!\n"
+        "🚫 Spam yoki noqonuniy maqsadlarda ishlatmang!"
+        "</blockquote>\n\n"
+        "✅ O'qib chiqdingizmi? <b>Tushundim</b> tugmasini bosing.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Tushundim", callback_data="fs_start")],
+            [InlineKeyboardButton(text="🔙 Orqaga",   callback_data="back_main")],
+        ]),
+        parse_mode="HTML",
+    )
+
+@r_fixsim.callback_query(F.data == "fs_start")
+async def fixsim_load_countries(call: CallbackQuery):
+    await call.message.edit_text("<b>⏳ Davlatlar yuklanmoqda...</b>", parse_mode="HTML")
+    countries = await get_countries_with_overrides()
+    if not countries:
+        await call.message.edit_text(
+            "<b>❌ Davlatlar yuklanmadi.</b>\n\n"
+            "<blockquote>Serverga ulanishda xato. Biroz kutib qayta urinib ko'ring.</blockquote>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Qayta urinish", callback_data="fs_start")],
+                [InlineKeyboardButton(text="🔙 Orqaga",        callback_data="back_main")],
+            ]),
+            parse_mode="HTML",
+        )
+        return
+    await call.message.edit_text(
+        "<b>🌍 Mavjud davlatlar ro'yxati:</b>\n\n"
+        "Kerakli davlatni tanlang:",
+        reply_markup=kb_fixsim_countries(countries, 0),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+@r_fixsim.callback_query(F.data.startswith("fs_page:"))
+async def fixsim_page(call: CallbackQuery):
+    page = int(call.data.split(":")[1])
+    countries = await get_countries_with_overrides()
+    if not countries:
+        await call.answer("Davlatlar yuklanmadi.", show_alert=True)
+        return
+    await call.message.edit_text(
+        "<b>🌍 Mavjud davlatlar ro'yxati:</b>\n\nKerakli davlatni tanlang:",
+        reply_markup=kb_fixsim_countries(countries, page),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+@r_fixsim.callback_query(F.data == "fs_top10")
+async def fixsim_top10(call: CallbackQuery):
+    countries = await get_countries_with_overrides()
+    if not countries:
+        await call.answer("Davlatlar yuklanmadi.", show_alert=True)
+        return
+    top = countries[:10]
+    await call.message.edit_text(
+        "<b>📊 TOP 10 mashhur davlatlar:</b>",
+        reply_markup=kb_fixsim_list(top, back_cb="fs_start"),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+@r_fixsim.callback_query(F.data == "fs_cheap")
+async def fixsim_cheap(call: CallbackQuery):
+    countries = await get_countries_with_overrides()
+    if not countries:
+        await call.answer("Davlatlar yuklanmadi.", show_alert=True)
+        return
+    sorted_c = sorted(countries, key=lambda c: float(c.get("price_uzs", 0)))
+    cheap = sorted_c[:10]
+    await call.message.edit_text(
+        "<b>💰 Eng arzon 10 ta davlat:</b>",
+        reply_markup=kb_fixsim_list(cheap, back_cb="fs_start"),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+@r_fixsim.callback_query(F.data.startswith("fs_buy:"))
+async def fixsim_buy_confirm(call: CallbackQuery):
+    parts = call.data.split(":", 2)
+    c_code = parts[1] if len(parts) > 1 else ""
+    c_name = parts[2] if len(parts) > 2 else c_code
+    if not c_code:
+        await call.answer("❌ Xato ma'lumot", show_alert=True)
+        return
+    countries = await get_countries_with_overrides()
+    price = 0
+    for c in countries:
+        if str(c.get("country_code", "")) == str(c_code):
+            price = int(c.get("price_uzs", 0))
+            break
+    if price <= 0:
+        await call.answer("❌ Narx aniqlanmadi. Qayta urinib ko'ring.", show_alert=True)
+        return
+    await call.message.edit_text(
+        "<b>🛒 Buyurtmangizni tasdiqlang</b>\n\n"
+        "<blockquote>"
+        f"🌍 Davlat:  <b>{c_name}</b>\n"
+        f"💵 Narxi:   <code>{fmt(price)}</code> so'm"
+        "</blockquote>\n\n"
+        "<blockquote>"
+        "⚠️ Raqamni Telegramning rasmiy ilovasidan faollashtirmang!\n"
+        "✅ Sinovdan o'tgan, 2 bosqichli parolli raqam beriladi."
+        "</blockquote>\n\n"
+        "Tasdiqlash uchun <b>✅ Sotib olish</b> tugmasini bosing.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Sotib olish",  callback_data=f"fs_confirm:{c_code}:{c_name[:30]}")],
+            [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="fs_start")],
+        ]),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+@r_fixsim.callback_query(F.data.startswith("fs_confirm:"))
+async def fixsim_confirm_buy(call: CallbackQuery, state: FSMContext):
+    parts = call.data.split(":", 2)
+    c_code = parts[1] if len(parts) > 1 else ""
+    c_name = parts[2] if len(parts) > 2 else c_code
+    if not c_code:
+        await call.answer("❌ Xato ma'lumot", show_alert=True)
+        return
+    countries = await get_countries_with_overrides()
+    price = 0
+    for c in countries:
+        if str(c.get("country_code", "")) == str(c_code):
+            price = int(c.get("price_uzs", 0))
+            break
+    if price <= 0:
+        await call.answer("❌ Narx aniqlanmadi", show_alert=True)
+        return
+    oid = await create_payment(
+        call.from_user.id, price, "nomer", price, state, call.message,
+        {"country_code": c_code, "country_name": c_name},
+    )
+    if oid:
+        await state.set_state(ShopSt.nomer_pay)
+    await call.answer()
+
+@r_fixsim.callback_query(F.data.startswith("fs_sms:"))
+async def fixsim_get_sms_cb(call: CallbackQuery):
+    hash_code = call.data.split(":", 1)[1] if ":" in call.data else ""
+    if not hash_code:
+        await call.answer("❌ Xato ma'lumot", show_alert=True)
+        return
+    if not await fixsim_flood_check(call.from_user.id, hash_code, cooldown=30):
+        await call.answer("⏳ Iltimos, 30 soniya kuting", show_alert=True)
+        return
+    result = await fixsim_get_sms(hash_code)
+    if result["sms"]:
+        sms_code = result["sms"]
+        password = result.get("password") or ""
+        text = (
+            "<b>🎉 SMS Kod keldi!</b>\n\n"
+            "<blockquote>"
+            f"🔢 Kirish kodi:       <code>{sms_code}</code>\n"
+        )
+        if password:
+            text += f"🔐 2 Bosqichli parol: <code>{password}</code>"
+        text += "</blockquote>"
+        await call.message.answer(text, parse_mode="HTML")
+        await call.answer()
+    else:
+        await call.answer(
+            "⏳ SMS hali kelmadi. 30 soniyadan so'ng qayta bosing.",
+            show_alert=True,
+        )
+        await call.message.edit_text(
+            "<b>⏳ SMS hali kelmadi.</b>\n\n"
+            "<blockquote>Biroz kuting va qayta tekshiring. Odatda 1–3 daqiqa ichida keladi.</blockquote>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Qayta tekshirish", callback_data=f"fs_sms:{hash_code}")],
+            ]),
+            parse_mode="HTML",
+        )
+
+@r_fixsim.callback_query(F.data == "none")
+async def none_cb(call: CallbackQuery):
+    await call.answer()
+
+
+# ─── Admin panel ──────────────────────────────────────────────
+@r_admin.message(Command("admin"), admin_only)
+async def admin_panel(msg: Message, state: FSMContext):
+    await state.clear()
+    await msg.answer("🔐 <b>Admin Panel</b>", reply_markup=kb_admin(), parse_mode="HTML")
+
+@r_admin.message(F.text == "🔙 Asosiy menyu", admin_only)
+async def admin_to_main(msg: Message, state: FSMContext):
+    await state.clear()
+    s = {
+        "stars_enabled":   await get_setting("stars_enabled",   "1"),
+        "premium_enabled": await get_setting("premium_enabled", "1"),
+        "gift_enabled":    await get_setting("gift_enabled",    "1"),
+        "nomer_enabled":   await get_setting("nomer_enabled",   "1"),
+    }
+    await msg.answer(
+        "Asosiy menyu:",
+        reply_markup=kb_main(
+            s["stars_enabled"] == "1", s["premium_enabled"] == "1",
+            s["gift_enabled"] == "1",  s["nomer_enabled"] == "1",
+        ),
+    )
+
+@r_admin.message(F.text == "📊 Statistika", admin_only)
+async def admin_stats(msg: Message):
+    s = await get_stats()
+    await msg.answer(
+        f"📊 <b>Statistika</b>\n\n"
+        f"👥 Jami foydalanuvchilar: <b>{s['users']}</b>\n"
+        f"🆕 Bugun qo'shilgan: <b>{s['new_today']}</b>\n\n"
+        f"✅ Muvaffaqiyatli buyurtmalar: <b>{s['paid']}</b>\n"
+        f"⏳ Kutilayotgan: <b>{s['pending']}</b>\n"
+        f"💰 Jami daromad: <b>{fmt(s['revenue'])} so'm</b>",
+        parse_mode="HTML",
+    )
+
+
+# ─── Admin: Stars narxlari ────────────────────────────────────
+@r_admin.message(F.text == "⭐ Stars narxlari", admin_only)
+async def admin_stars_menu(msg: Message):
+    await msg.answer("⭐ <b>Stars paketlari:</b>", reply_markup=kb_admin_stars(await get_stars_packages()), parse_mode="HTML")
+
+@r_admin.callback_query(F.data.startswith("edit_stars:"))
+async def edit_stars_cb(call: CallbackQuery, state: FSMContext):
+    idx = int(call.data.split(":")[1])
+    pkgs = await get_stars_packages()
+    await state.update_data(idx=idx, pkg_type="stars")
+    await state.set_state(AdminSt.edit_price)
+    await call.message.answer(
+        f"⭐ <b>{pkgs[idx]['stars']} Stars</b> — hozirgi: <b>{fmt(pkgs[idx]['price'])} so'm</b>\n\nYangi narx (so'm):",
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+@r_admin.callback_query(F.data == "add_stars_pkg")
+async def add_stars_start(call: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminSt.add_stars_value)
+    await call.message.answer("⭐ Yangi paket uchun nechta Stars? (masalan: 300)")
+    await call.answer()
+
+@r_admin.message(AdminSt.add_stars_value, admin_only)
+async def add_stars_value(msg: Message, state: FSMContext):
+    raw = (msg.text or "").strip().replace(" ", "")
+    if not raw.isdigit():
+        await msg.answer("Faqat raqam kiriting!")
+        return
+    await state.update_data(new_value=int(raw))
+    await state.set_state(AdminSt.add_stars_price)
+    await msg.answer(f"💰 {raw} Stars uchun narx (so'm)?")
+
+@r_admin.message(AdminSt.add_stars_price, admin_only)
+async def add_stars_price(msg: Message, state: FSMContext):
+    raw = (msg.text or "").strip().replace(" ", "")
+    if not raw.isdigit():
+        await msg.answer("Faqat raqam kiriting!")
+        return
+    data = await state.get_data()
+    pkgs = await get_stars_packages()
+    pkgs.append({"stars": data["new_value"], "price": int(raw)})
+    pkgs.sort(key=lambda x: x["stars"])
+    await set_stars_packages(pkgs)
+    await state.clear()
+    await msg.answer("✅ Yangi paket qo'shildi!", reply_markup=kb_admin_stars(pkgs))
+
+@r_admin.callback_query(F.data == "del_stars_menu")
+async def del_stars_menu(call: CallbackQuery):
+    await call.message.edit_reply_markup(reply_markup=kb_del_stars(await get_stars_packages()))
+    await call.answer()
+
+@r_admin.callback_query(F.data.startswith("del_stars:"))
+async def del_stars_pkg(call: CallbackQuery):
+    idx = int(call.data.split(":")[1])
+    pkgs = await get_stars_packages()
+    if len(pkgs) <= 1:
+        await call.answer("Kamida 1 ta paket qolishi kerak!", show_alert=True)
+        return
+    removed = pkgs.pop(idx)
+    await set_stars_packages(pkgs)
+    await call.answer(f"✅ {removed['stars']} Stars o'chirildi.")
+    await call.message.edit_reply_markup(reply_markup=kb_admin_stars(pkgs))
+
+
+# ─── Admin: Premium narxlari ──────────────────────────────────
+@r_admin.message(F.text == "💎 Premium narxlari", admin_only)
+async def admin_premium_menu(msg: Message):
+    await msg.answer("💎 <b>Premium paketlari:</b>", reply_markup=kb_admin_premium(await get_premium_packages()), parse_mode="HTML")
+
+@r_admin.callback_query(F.data.startswith("edit_premium:"))
+async def edit_premium_cb(call: CallbackQuery, state: FSMContext):
+    idx = int(call.data.split(":")[1])
+    pkgs = await get_premium_packages()
+    await state.update_data(idx=idx, pkg_type="premium")
+    await state.set_state(AdminSt.edit_price)
+    await call.message.answer(
+        f"💎 <b>{pkgs[idx]['label']}</b> — hozirgi: <b>{fmt(pkgs[idx]['price'])} so'm</b>\n\nYangi narx (so'm):",
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+@r_admin.callback_query(F.data == "add_premium_pkg")
+async def add_premium_start(call: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminSt.add_premium_value)
+    await call.message.answer("💎 Necha oy uchun paket? (masalan: 2)")
+    await call.answer()
+
+@r_admin.message(AdminSt.add_premium_value, admin_only)
+async def add_premium_value(msg: Message, state: FSMContext):
+    raw = (msg.text or "").strip().replace(" ", "")
+    if not raw.isdigit():
+        await msg.answer("Faqat raqam kiriting!")
+        return
+    await state.update_data(new_value=int(raw))
+    await state.set_state(AdminSt.add_premium_label)
+    await msg.answer(f"📝 {raw} oy uchun yorliq kiriting (masalan: '2 oy'):")
+
+@r_admin.message(AdminSt.add_premium_label, admin_only)
+async def add_premium_label(msg: Message, state: FSMContext):
+    await state.update_data(new_label=(msg.text or "").strip())
+    await state.set_state(AdminSt.add_premium_price)
+    await msg.answer("💰 Narxi (so'm)?")
+
+@r_admin.message(AdminSt.add_premium_price, admin_only)
+async def add_premium_price_f(msg: Message, state: FSMContext):
+    raw = (msg.text or "").strip().replace(" ", "")
+    if not raw.isdigit():
+        await msg.answer("Faqat raqam kiriting!")
+        return
+    data = await state.get_data()
+    pkgs = await get_premium_packages()
+    pkgs.append({"months": data["new_value"], "label": data["new_label"], "price": int(raw)})
+    pkgs.sort(key=lambda x: x["months"])
+    await set_premium_packages(pkgs)
+    await state.clear()
+    await msg.answer("✅ Yangi paket qo'shildi!", reply_markup=kb_admin_premium(pkgs))
+
+@r_admin.callback_query(F.data == "del_premium_menu")
+async def del_premium_menu(call: CallbackQuery):
+    await call.message.edit_reply_markup(reply_markup=kb_del_premium(await get_premium_packages()))
+    await call.answer()
+
+@r_admin.callback_query(F.data.startswith("del_premium:"))
+async def del_premium_pkg(call: CallbackQuery):
+    idx = int(call.data.split(":")[1])
+    pkgs = await get_premium_packages()
+    if len(pkgs) <= 1:
+        await call.answer("Kamida 1 ta paket qolishi kerak!", show_alert=True)
+        return
+    removed = pkgs.pop(idx)
+    await set_premium_packages(pkgs)
+    await call.answer(f"✅ {removed['label']} o'chirildi.")
+    await call.message.edit_reply_markup(reply_markup=kb_admin_premium(pkgs))
+
+
+# ─── Admin: Gift narxlari ─────────────────────────────────────
+@r_admin.message(F.text == "🎁 Gift narxlari", admin_only)
+async def admin_gift_menu(msg: Message):
+    await msg.answer("🎁 <b>Gift paketlari:</b>", reply_markup=kb_admin_gifts(await get_gift_packages()), parse_mode="HTML")
+
+@r_admin.callback_query(F.data.startswith("edit_gift:"))
+async def edit_gift_cb(call: CallbackQuery, state: FSMContext):
+    idx = int(call.data.split(":")[1])
+    pkgs = await get_gift_packages()
+    await state.update_data(idx=idx, pkg_type="gift")
+    await state.set_state(AdminSt.edit_price)
+    await call.message.answer(
+        f"🎁 <b>{pkgs[idx]['name']}</b> — hozirgi: <b>{fmt(pkgs[idx]['price'])} so'm</b>\n\nYangi narx (so'm):",
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+@r_admin.callback_query(F.data == "add_gift_pkg")
+async def add_gift_start(call: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminSt.add_gift_id)
+    await call.message.answer("🎁 Gift ID sini kiriting (masalan: gift_select:0:15):")
+    await call.answer()
+
+@r_admin.message(AdminSt.add_gift_id, admin_only)
+async def add_gift_id_input(msg: Message, state: FSMContext):
+    await state.update_data(new_gift_id=(msg.text or "").strip())
+    await state.set_state(AdminSt.add_gift_name)
+    await msg.answer("🎁 Gift nomini kiriting (masalan: 🎂 Tort):")
+
+@r_admin.message(AdminSt.add_gift_name, admin_only)
+async def add_gift_name_input(msg: Message, state: FSMContext):
+    await state.update_data(new_gift_name=(msg.text or "").strip())
+    await state.set_state(AdminSt.add_gift_stars)
+    await msg.answer("⭐ Gift stars_cost qiymatini kiriting (1–100):")
+
+@r_admin.message(AdminSt.add_gift_stars, admin_only)
+async def add_gift_stars_input(msg: Message, state: FSMContext):
+    raw = (msg.text or "").strip()
+    if not raw.isdigit() or not (1 <= int(raw) <= 100):
+        await msg.answer("⚠️ 1 dan 100 gacha raqam kiriting.")
+        return
+    await state.update_data(new_stars_cost=int(raw))
+    await state.set_state(AdminSt.add_gift_price)
+    await msg.answer("💰 Narxi (so'm)?")
+
+@r_admin.message(AdminSt.add_gift_price, admin_only)
+async def add_gift_price_input(msg: Message, state: FSMContext):
+    raw = (msg.text or "").strip().replace(" ", "")
+    if not raw.isdigit():
+        await msg.answer("Faqat raqam kiriting!")
+        return
+    data = await state.get_data()
+    pkgs = await get_gift_packages()
+    pkgs.append({
+        "gift_id": data["new_gift_id"], "name": data["new_gift_name"],
+        "stars_cost": data["new_stars_cost"], "price": int(raw),
+    })
+    await set_gift_packages(pkgs)
+    await state.clear()
+    await msg.answer("✅ Yangi gift qo'shildi!", reply_markup=kb_admin_gifts(pkgs))
+
+@r_admin.callback_query(F.data == "del_gift_menu")
+async def del_gift_menu_cb(call: CallbackQuery):
+    await call.message.edit_reply_markup(reply_markup=kb_del_gifts(await get_gift_packages()))
+    await call.answer()
+
+@r_admin.callback_query(F.data.startswith("del_gift:"))
+async def del_gift_pkg(call: CallbackQuery):
+    idx = int(call.data.split(":")[1])
+    pkgs = await get_gift_packages()
+    if len(pkgs) <= 1:
+        await call.answer("Kamida 1 ta paket qolishi kerak!", show_alert=True)
+        return
+    removed = pkgs.pop(idx)
+    await set_gift_packages(pkgs)
+    await call.answer(f"✅ {removed['name']} o'chirildi.")
+    await call.message.edit_reply_markup(reply_markup=kb_admin_gifts(pkgs))
+
+
+# ─── Admin: narx tahrirlash (umumiy) ─────────────────────────
+@r_admin.message(AdminSt.edit_price, admin_only)
+async def save_price_any(msg: Message, state: FSMContext):
+    raw = (msg.text or "").strip().replace(" ", "")
+    if not raw.isdigit():
+        await msg.answer("Faqat raqam kiriting!")
+        return
+    data = await state.get_data()
+    pkg_type = data.get("pkg_type", "stars")
+    pkgs = await get_packages(pkg_type)
+    pkgs[data["idx"]]["price"] = int(raw)
+    await set_packages(pkg_type, pkgs)
+    await state.clear()
+    kbs = {"stars": kb_admin_stars, "premium": kb_admin_premium, "gift": kb_admin_gifts}
+    await msg.answer("✅ Narx yangilandi!", reply_markup=kbs[pkg_type](pkgs))
+
+
+# ─── Admin: 📞 Nomer narxlari ─────────────────────────────────
+@r_admin.message(F.text == "📞 Nomer narxlari", admin_only)
+async def admin_nomer_menu(msg: Message):
+    overrides = await get_nomer_overrides()
+    countries = await fixsim_get_countries()
+    count = len(overrides)
+    text = (
+        f"📞 <b>Nomer narxlari</b>\n\n"
+        f"FixSIM API narxlari asosida ko'rsatiladi.\n"
+        f"✏️ O'zgartirilgan davlatlar: <b>{count}</b> ta\n\n"
+        f"Davlat tanlang va narxni o'zgartiring.\n"
+        f"Override o'rnatilmagan davlatlar API narxida ko'rinadi."
+    )
+    await msg.answer(
+        text,
+        reply_markup=kb_admin_nomer_overrides(overrides, countries),
+        parse_mode="HTML",
+    )
+
+@r_admin.callback_query(F.data == "admin_nomer_back")
+async def admin_nomer_back_cb(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    overrides = await get_nomer_overrides()
+    countries = await fixsim_get_countries()
+    count = len(overrides)
+    await call.message.edit_text(
+        f"📞 <b>Nomer narxlari</b>\n\n"
+        f"FixSIM API narxlari asosida ko'rsatiladi.\n"
+        f"✏️ O'zgartirilgan davlatlar: <b>{count}</b> ta",
+        reply_markup=kb_admin_nomer_overrides(overrides, countries),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+@r_admin.callback_query(F.data == "nomer_add")
+async def nomer_add_cb(call: CallbackQuery):
+    countries = await get_countries_with_overrides()
+    if not countries:
+        await call.answer("❌ Davlatlar yuklanmadi.", show_alert=True)
+        return
+    await call.message.edit_text(
+        "<b>🌍 Narx o'zgartirmoqchi bo'lgan davlatni tanlang:</b>\n\n"
+        "✏️ — narxi allaqachon o'zgartirilgan",
+        reply_markup=kb_admin_nomer_country_select(countries, 0, "nomer_set_country"),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+@r_admin.callback_query(F.data.startswith("nomer_cpage:"))
+async def nomer_country_page(call: CallbackQuery):
+    parts = call.data.split(":")
+    page = int(parts[1])
+    action = parts[2] if len(parts) > 2 else "nomer_set_country"
+    countries = await get_countries_with_overrides()
+    if not countries:
+        await call.answer("Davlatlar yuklanmadi.", show_alert=True)
+        return
+    await call.message.edit_text(
+        "<b>🌍 Davlatni tanlang:</b>",
+        reply_markup=kb_admin_nomer_country_select(countries, page, action),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+@r_admin.callback_query(F.data.startswith("nomer_set_country:"))
+async def nomer_set_country_cb(call: CallbackQuery, state: FSMContext):
+    parts = call.data.split(":", 2)
+    c_code = parts[1] if len(parts) > 1 else ""
+    c_name = parts[2] if len(parts) > 2 else c_code
+    if not c_code:
+        await call.answer("❌ Xato", show_alert=True)
+        return
+
+    countries = await get_countries_with_overrides()
+    api_price = 0
+    for c in countries:
+        if str(c.get("country_code", "")) == c_code:
+            api_price = int(c.get("price_uzs", 0))
+            break
+
+    overrides = await get_nomer_overrides()
+    current = overrides.get(c_code)
+    current_text = f"\n✏️ Hozirgi override: <b>{fmt(current)} so'm</b>" if current else f"\n📡 API narxi: <b>{fmt(api_price)} so'm</b>"
+
+    await state.update_data(nomer_c_code=c_code, nomer_c_name=c_name)
+    await state.set_state(AdminSt.nomer_set_price)
+    await call.message.edit_text(
+        f"📞 <b>{c_name}</b>{current_text}\n\n"
+        f"Yangi narxni so'mda kiriting:\n"
+        f"<i>(0 kiritsangiz override o'chiriladi va API narxi ishlatiladi)</i>\n\n"
+        f"Bekor qilish: /cancel",
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+@r_admin.message(AdminSt.nomer_set_price, admin_only)
+async def nomer_set_price_input(msg: Message, state: FSMContext):
+    raw = (msg.text or "").strip().replace(" ", "")
+    if not raw.isdigit():
+        await msg.answer("⚠️ Faqat raqam kiriting (so'mda)!")
+        return
+    price = int(raw)
+    data = await state.get_data()
+    c_code = data.get("nomer_c_code", "")
+    c_name = data.get("nomer_c_name", c_code)
+    await state.clear()
+
+    if price == 0:
+        await remove_nomer_override(c_code)
+        await msg.answer(
+            f"✅ <b>{c_name}</b> uchun override o'chirildi.\nEndi API narxi ishlatiladi.",
+            parse_mode="HTML",
+        )
+    else:
+        await set_nomer_override(c_code, price)
+        await msg.answer(
+            f"✅ <b>{c_name}</b> uchun yangi narx belgilandi:\n"
+            f"💰 <b>{fmt(price)} so'm</b>",
+            parse_mode="HTML",
+        )
+
+    overrides = await get_nomer_overrides()
+    countries = await fixsim_get_countries()
+    await msg.answer(
+        f"📞 <b>Nomer narxlari</b>\n\nO'zgartirilgan davlatlar: <b>{len(overrides)}</b> ta",
+        reply_markup=kb_admin_nomer_overrides(overrides, countries),
+        parse_mode="HTML",
+    )
+
+@r_admin.callback_query(F.data.startswith("nomer_edit:"))
+async def nomer_edit_cb(call: CallbackQuery, state: FSMContext):
+    c_code = call.data.split(":", 1)[1]
+    countries = await get_countries_with_overrides()
+    c_name = c_code
+    api_price = 0
+    for c in countries:
+        if str(c.get("country_code", "")) == c_code:
+            c_name = c.get("country_name", c_code)
+            api_price = int(c.get("price_uzs", 0))
+            break
+    overrides = await get_nomer_overrides()
+    current = overrides.get(c_code, api_price)
+    await state.update_data(nomer_c_code=c_code, nomer_c_name=c_name)
+    await state.set_state(AdminSt.nomer_set_price)
+    await call.message.edit_text(
+        f"📞 <b>{c_name}</b>\n"
+        f"✏️ Hozirgi narx: <b>{fmt(current)} so'm</b>\n\n"
+        f"Yangi narxni so'mda kiriting:\n"
+        f"<i>(0 kiritsangiz override o'chiriladi)</i>\n\n"
+        f"Bekor qilish: /cancel",
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+@r_admin.callback_query(F.data.startswith("nomer_del:"))
+async def nomer_del_cb(call: CallbackQuery):
+    c_code = call.data.split(":", 1)[1]
+    countries = await fixsim_get_countries()
+    name_map = {str(c.get("country_code", "")): c.get("country_name", c_code) for c in countries}
+    c_name = name_map.get(c_code, c_code)
+    await remove_nomer_override(c_code)
+    await call.answer(f"✅ {c_name} override o'chirildi.")
+    overrides = await get_nomer_overrides()
+    await call.message.edit_reply_markup(
+        reply_markup=kb_admin_nomer_overrides(overrides, countries)
+    )
+
+
+# ─── Admin: Majburiy obuna ────────────────────────────────────
+@r_admin.message(F.text == "📢 Majburiy obuna", admin_only)
+async def admin_channels_menu(msg: Message):
+    channels = await get_forced_channels()
+    text = "<b>📢 Majburiy obuna kanallari</b>\n\n" + (
+        "\n".join(f"• {ch['title']} (<code>{ch['channel_id']}</code>)" for ch in channels)
+        if channels else "Hozircha kanal yo'q."
+    )
+    await msg.answer(text, reply_markup=kb_admin_channels(channels), parse_mode="HTML")
+
+@r_admin.callback_query(F.data == "add_channel")
+async def add_channel_start(call: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminSt.add_ch_id)
+    await call.message.answer(
+        "📢 Kanal ID sini kiriting\n(masalan: <code>-1001234567890</code>)\n\n"
+        "Botni kanalingizga admin qilib qo'shing!",
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+@r_admin.message(AdminSt.add_ch_id, admin_only)
+async def add_ch_id_input(msg: Message, state: FSMContext):
+    await state.update_data(ch_id=(msg.text or "").strip())
+    await state.set_state(AdminSt.add_ch_title)
+    await msg.answer("📝 Kanal nomini kiriting:")
+
+@r_admin.message(AdminSt.add_ch_title, admin_only)
+async def add_ch_title_input(msg: Message, state: FSMContext):
+    await state.update_data(ch_title=(msg.text or "").strip())
+    await state.set_state(AdminSt.add_ch_link)
+    await msg.answer("🔗 Kanal havolasini kiriting (https://t.me/...):")
+
+@r_admin.message(AdminSt.add_ch_link, admin_only)
+async def add_ch_link_input(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    await add_forced_channel(data["ch_id"], data["ch_title"], (msg.text or "").strip())
+    channels = await get_forced_channels()
+    await state.clear()
+    await msg.answer(
+        f"✅ Kanal qo'shildi: <b>{data['ch_title']}</b>",
+        reply_markup=kb_admin_channels(channels), parse_mode="HTML",
+    )
+
+@r_admin.callback_query(F.data.startswith("del_channel:"))
+async def del_channel(call: CallbackQuery):
+    await remove_forced_channel(int(call.data.split(":")[1]))
+    channels = await get_forced_channels()
+    await call.message.edit_reply_markup(reply_markup=kb_admin_channels(channels))
+    await call.answer("✅ O'chirildi.")
+
+
+# ─── Admin: Bot sozlamalari ───────────────────────────────────
+@r_admin.message(F.text == "⚙️ Bot sozlamalari", admin_only)
+async def bot_settings(msg: Message):
+    s = {
+        "stars_enabled":   await get_setting("stars_enabled",   "1"),
+        "premium_enabled": await get_setting("premium_enabled", "1"),
+        "gift_enabled":    await get_setting("gift_enabled",    "1"),
+        "nomer_enabled":   await get_setting("nomer_enabled",   "1"),
+    }
+    welcome = await get_setting("welcome_text", "Xush kelibsiz!")
+    sts = lambda v: "✅ Yoqiq" if v == "1" else "❌ O'chiq"
+    await msg.answer(
+        f"⚙️ <b>Bot sozlamalari</b>\n\n"
+        f"⭐ Stars: {sts(s['stars_enabled'])}\n"
+        f"💎 Premium: {sts(s['premium_enabled'])}\n"
+        f"🎁 Gift: {sts(s['gift_enabled'])}\n"
+        f"📞 Nomer: {sts(s['nomer_enabled'])}\n\n"
+        f"📝 Xush kelish matni:\n<i>{welcome}</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"⭐ Stars: {sts(s['stars_enabled'])}", callback_data="toggle_stars")],
+            [InlineKeyboardButton(text=f"💎 Premium: {sts(s['premium_enabled'])}", callback_data="toggle_premium")],
+            [InlineKeyboardButton(text=f"🎁 Gift: {sts(s['gift_enabled'])}", callback_data="toggle_gift")],
+            [InlineKeyboardButton(text=f"📞 Nomer: {sts(s['nomer_enabled'])}", callback_data="toggle_nomer")],
+            [InlineKeyboardButton(text="✏️ Xush kelish xabarini o'zgartirish", callback_data="edit_welcome")],
+        ]),
+        parse_mode="HTML",
+    )
+
+async def _toggle(call: CallbackQuery, key: str, label: str):
+    cur = await get_setting(key, "1")
+    new = "0" if cur == "1" else "1"
+    await set_setting(key, new)
+    state_text = "yoqildi ✅" if new == "1" else "o'chirildi ❌"
+    await call.answer(f"{label} {state_text}", show_alert=True)
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+@r_admin.callback_query(F.data == "toggle_stars")
+async def toggle_stars(call: CallbackQuery):   await _toggle(call, "stars_enabled",   "Stars")
+@r_admin.callback_query(F.data == "toggle_premium")
+async def toggle_premium(call: CallbackQuery): await _toggle(call, "premium_enabled", "Premium")
+@r_admin.callback_query(F.data == "toggle_gift")
+async def toggle_gift(call: CallbackQuery):    await _toggle(call, "gift_enabled",    "Gift")
+@r_admin.callback_query(F.data == "toggle_nomer")
+async def toggle_nomer(call: CallbackQuery):   await _toggle(call, "nomer_enabled",   "Nomer xizmati")
+
+@r_admin.callback_query(F.data == "edit_welcome")
+async def edit_welcome_start(call: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminSt.edit_welcome)
+    await call.message.answer("✏️ Yangi xush kelish xabarini kiriting:")
+    await call.answer()
+
+@r_admin.message(AdminSt.edit_welcome, admin_only)
+async def save_welcome(msg: Message, state: FSMContext):
+    await set_setting("welcome_text", (msg.text or "").strip())
+    await state.clear()
+    await msg.answer("✅ Xush kelish matni yangilandi!")
+
+@r_admin.callback_query(F.data == "admin_back")
+async def admin_back(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await call.answer()
+
+
+# ─── Admin: Broadcast ─────────────────────────────────────────
+@r_admin.message(F.text == "📣 Xabar yuborish", admin_only)
+async def broadcast_start(msg: Message, state: FSMContext):
+    await state.set_state(AdminSt.broadcast)
+    await msg.answer(
+        "📣 <b>Broadcast</b>\n\n"
+        "Barcha foydalanuvchilarga yuboriladigan xabarni kiriting.\n"
+        "HTML formatlash qo'llab-quvvatlanadi.\n\nBekor qilish: /cancel",
+        parse_mode="HTML",
+    )
+
+@r_admin.message(AdminSt.broadcast, admin_only)
+async def do_broadcast(msg: Message, state: FSMContext, bot: Bot):
+    if not msg.text:
+        await msg.answer("⚠️ Faqat matnli xabar yuboring.")
+        return
+    await state.clear()
+    user_ids = await get_all_user_ids()
+    total = len(user_ids)
+    sent = failed = 0
+    status_msg = await msg.answer(f"📤 Yuborilmoqda... 0/{total}")
+    for uid in user_ids:
+        try:
+            await bot.send_message(uid, msg.text, parse_mode="HTML")
+            sent += 1
+        except Exception:
+            failed += 1
+        if (sent + failed) % 20 == 0:
+            try:
+                await status_msg.edit_text(f"📤 Yuborilmoqda... {sent + failed}/{total}")
+            except Exception:
+                pass
+        await asyncio.sleep(0.05)
+    await status_msg.edit_text(
+        f"✅ <b>Broadcast yakunlandi!</b>\n\n"
+        f"📤 Yuborildi: <b>{sent}</b>\n"
+        f"❌ Muvaffaqiyatsiz: <b>{failed}</b>\n"
+        f"📊 Jami: <b>{total}</b>",
+        parse_mode="HTML",
+    )
+
+
+# ─── Admin: Hyperpin ──────────────────────────────────────────
+@r_admin.message(F.text == "💰 Hyperpin", admin_only)
+async def hyperpin_panel(msg: Message):
+    bal   = await hyperpin_balance()
+    stats = await hyperpin_account_stats()
+    dep   = await hyperpin_deposit()
+    text  = ""
+    if bal.get("success"):
+        text += f"💰 <b>Balans:</b> <code>{bal.get('balance', '?')} TON</code>\n"
+        text += f"👤 <b>Foydalanuvchi:</b> @{bal.get('username', '?')}\n"
+    else:
+        err_msg = bal.get("error", "Noma'lum")
+        text += f"❌ Balans xatosi: {err_msg}\n"
+    if isinstance(stats, dict) and not stats.get("error"):
+        text += "\n📊 <b>Statistika:</b>\n" + "\n".join(f"• {k}: {v}" for k, v in stats.items() if k != "success")
+    if dep.get("address"):
+        text += f"\n\n📥 <b>Depozit manzil:</b> <code>{dep['address']}</code>"
+    await msg.answer(text.strip() or "Ma'lumot yo'q.", parse_mode="HTML")
+
+
+# ─── Veb-server va self-ping ──────────────────────────────────
+from aiohttp import web
+
+SELF_PORT = int(os.environ.get("PORT", os.environ.get("BOT_PORT", 5000)))
+
+async def _health(request):
+    return web.Response(text="OK")
+
+async def run_webserver():
+    app = web.Application()
+    app.router.add_get("/", _health)
+    app.router.add_get("/health", _health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", SELF_PORT).start()
+    logger.info(f"Veb-server {SELF_PORT}-portda ishga tushdi.")
+
+async def self_ping():
+    await asyncio.sleep(30)
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(f"http://localhost:{SELF_PORT}/health")
+                logger.info(f"Self-ping OK ({r.status_code})")
+        except Exception as e:
+            logger.warning(f"Self-ping xatosi: {e}")
+        await asyncio.sleep(90)
+
+
+# ─── Asosiy funksiya ──────────────────────────────────────────
+async def main():
+    logger.info("Bot ishga tushmoqda...")
+    await init_db()
+    logger.info("Baza tayyor.")
+
+    bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+    dp = Dispatcher(storage=MemoryStorage())
+
+    for router in (r_common, r_admin, r_start, r_fixsim, r_shop):
+        dp.include_router(router)
+
+    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Polling boshlandi. Bot tayyor!")
+
+    try:
+        await asyncio.gather(
+            dp.start_polling(
+                bot,
+                skip_updates=True,
+                allowed_updates=dp.resolve_used_update_types(),
+            ),
+            run_webserver(),
+            self_ping(),
+        )
+    finally:
+        if _hyperpin_client and not _hyperpin_client.is_closed:
+            await _hyperpin_client.aclose()
+        await bot.session.close()
+        logger.info("Bot to'xtatildi.")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
